@@ -11,7 +11,6 @@ from .options import Options
 from .utils.file_io import Serializable
 from .utils.parallel import parallel_map
 
-
 class FloquetAnalysis(Serializable):
     """Perform a floquet analysis to identify nonlinear resonances.
 
@@ -252,6 +251,7 @@ class FloquetAnalysis(Serializable):
             # need to pass forward the floquet modes from the previous amp range
             # which allow us to identify floquet modes that may have been displaced
             # far from the origin
+            print(f"_floquet_main_for_amp_range")
             output = self._floquet_main_for_amp_range(
                 amp_idxs, displaced_state, previous_coefficients, prev_f_modes_arr
             )
@@ -262,6 +262,7 @@ class FloquetAnalysis(Serializable):
                 quasienergies_for_range,
                 prev_f_modes_arr,
             ) = output
+            print(f"placing into")
             bare_state_overlaps = self._place_into(
                 amp_idxs, bare_state_overlaps_for_range, bare_state_overlaps
             )
@@ -276,12 +277,19 @@ class FloquetAnalysis(Serializable):
             )
 
             # ovlp_with_bare_states is used as a mask for the fit
+            print(f"overlap_with_bare_states")
             ovlp_with_bare_states = displaced_state.overlap_with_bare_states(
                 amp_idxs[0], previous_coefficients, floquet_modes_for_range
             )
             omega_d_amp_slice = list(self.model.omega_d_amp_params(amp_idxs))
+            print(f"displaced_states_fit ovlp_with_bare_states")
             # Compute the fitted 'ideal' displaced state, excluding those
             # floquet modes experiencing resonances.
+            # if self.options.new_functions:
+            #     new_coefficients = displaced_state.displaced_states_fit_new(
+            #         omega_d_amp_slice, ovlp_with_bare_states, floquet_modes_for_range
+            #     )
+            # else:
             new_coefficients = displaced_state.displaced_states_fit(
                 omega_d_amp_slice, ovlp_with_bare_states, floquet_modes_for_range
             )
@@ -291,9 +299,16 @@ class FloquetAnalysis(Serializable):
             # opposed to the more restricted floquet_modes_for_range since we
             # use indexing methods inside of overlap_with_displaced_states, so its
             # easier to pass in the whole array.
-            overlaps = displaced_state.overlap_with_displaced_states(
-                amp_idxs, new_coefficients, floquet_modes
-            )
+            print(f"overlap_with_displaced_states new_coefficients")
+            if self.options.new_functions:
+                overlaps = displaced_state.overlap_with_displaced_states_new(
+                    amp_idxs, new_coefficients, floquet_modes
+                )
+            else:
+                overlaps = displaced_state.overlap_with_displaced_states(
+                    amp_idxs, new_coefficients, floquet_modes
+                )
+            print(f"placing into")
             intermediate_displaced_state_overlaps = self._place_into(
                 amp_idxs, overlaps, intermediate_displaced_state_overlaps
             )
@@ -307,14 +322,27 @@ class FloquetAnalysis(Serializable):
         # (stored in intermediate_displaced_state_overlaps) to obtain the mask with
         # which we exclude some data from the fit (because we suspect they've hit
         # resonances).
+        print(f"displaced_states_fit")
         amp_idxs = [0, len(self.model.drive_amplitudes)]
         omega_d_amp_slice = list(self.model.omega_d_amp_params(amp_idxs))
+        print(f"displaced_states_fit intermediate_displaced_state_overlaps")
+        # if self.options.new_functions:
+        #     full_displaced_fit = displaced_state.displaced_states_fit_new(
+        #         omega_d_amp_slice, intermediate_displaced_state_overlaps, floquet_modes
+        #     )
+        # else:
         full_displaced_fit = displaced_state.displaced_states_fit(
             omega_d_amp_slice, intermediate_displaced_state_overlaps, floquet_modes
         )
-        true_overlaps = displaced_state.overlap_with_displaced_states(
-            amp_idxs, full_displaced_fit, floquet_modes
-        )
+        print(f"overlap_with_displaced_states full_displaced_fit")
+        if self.options.new_functions:
+            true_overlaps = displaced_state.overlap_with_displaced_states_new(
+                amp_idxs, full_displaced_fit, floquet_modes
+            )
+        else:
+            true_overlaps = displaced_state.overlap_with_displaced_states(
+                amp_idxs, full_displaced_fit, floquet_modes
+            )
         data_dict = {
             "bare_state_overlaps": bare_state_overlaps,
             "fit_data": full_displaced_fit,
@@ -383,12 +411,13 @@ class FloquetAnalysis(Serializable):
             )
 
         floquet_data = list(
-            parallel_map(
-                self.options.num_cpus,
-                _run_floquet_and_calculate,
+                parallel_map(
+                    self.options.num_cpus,
+                    _run_floquet_and_calculate,
                 self.model.omega_d_values,
             )
         )
+        
         (
             all_modes_quasies_ovlps,
             all_avg_excitation,

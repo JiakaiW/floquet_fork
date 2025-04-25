@@ -95,102 +95,114 @@ class DisplacedState:
     def overlap_with_displaced_states(
         self, amp_idxs: list, coefficients: np.ndarray, floquet_modes: np.ndarray
     ) -> np.ndarray:
-        """Calculate overlap of floquet modes with 'ideal' displaced states.
+        def _run_overlap_displaced(omega_d_amp: tuple[float, float]) -> np.ndarray:
+            overlap = np.zeros(len(self.state_indices))
+            omega_d, amp = omega_d_amp
+            for array_idx, state_idx in enumerate(self.state_indices):
+                floquet_mode_for_idx = floquet_modes[
+                    self.model.omega_d_to_idx(omega_d),
+                    self.model.amp_to_idx(amp, omega_d),
+                    array_idx,
+                ]
+                disp_state = self.displaced_state(
+                    omega_d,
+                    amp,
+                    state_idx=state_idx,
+                    coefficients=coefficients[array_idx],
+                ).dag()
+                overlap[array_idx] = np.abs(
+                    disp_state.data.to_array()[0] @ floquet_mode_for_idx
+                )
+            return overlap
 
-        This is done here for a specific amplitude range.
+        omega_d_amp_params = list(self.model.omega_d_amp_params(amp_idxs))
+        amp_range_vals = self.model.drive_amplitudes[amp_idxs[0] : amp_idxs[1]]
+        result = list(
+            parallel_map(
+                self.options.num_cpus, _run_overlap_displaced, omega_d_amp_params
+            )
+        )
+        return np.array(result).reshape(
+            (
+                len(self.model.omega_d_values),
+                len(amp_range_vals),
+                len(self.state_indices),
+            )
+        )
 
-        Parameters:
-            amp_idxs: list of lower and upper amplitude indices specifying the range of
-                drive amplitudes this calculation should be done for
-            coefficients: coefficients that specify the displaced state that we
-                calculate overlaps of Floquet modes against
-            floquet_modes: Floquet modes to be compared to the displaced states given by
-                coefficients
-        Returns:
-            overlaps with shape (w,a,s) where w is the number of drive frequencies,
-                a is the number of drive amplitudes (specified by amp_idxs) and s is the
-                number of states we are investigating
-        """
+    def overlap_with_displaced_states_new(
+        self, amp_idxs: list, coefficients: np.ndarray, floquet_modes: np.ndarray
+    ) -> np.ndarray:
         # Pre-compute basis states matrix once outside the parallel loop
-        basis_states = np.array(
-            [
-                qt.basis(self.hilbert_dim, i).full().flatten()
-                for i in range(self.hilbert_dim)
-            ]
-        )  # Shape: (h, h)
-
+        basis_states = np.array([
+            qt.basis(self.hilbert_dim, i).full().flatten()
+            for i in range(self.hilbert_dim)
+        ])  # Shape: (h, h)
+        
         # Get all omega_d and amp combinations and materialize the iterator
         omega_d_amp_params = list(self.model.omega_d_amp_params(amp_idxs))
         amp_range_vals = self.model.drive_amplitudes[amp_idxs[0] : amp_idxs[1]]
-
+        
         # Pre-compute all indices to avoid repeated calls
-        indices = [
-            (self.model.omega_d_to_idx(omega_d), self.model.amp_to_idx(amp, omega_d))
-            for omega_d, amp in omega_d_amp_params
-        ]
-
+        indices = [(
+            self.model.omega_d_to_idx(omega_d),
+            self.model.amp_to_idx(amp, omega_d)
+        ) for omega_d, amp in omega_d_amp_params]
+        
         # Create batches of points to process
-        batch_size = max(
-            len(omega_d_amp_params) // (self.options.num_cpus * 4), 1
-        )  # Ensure at least 4 tasks per core
+        batch_size = max(len(omega_d_amp_params) // (self.options.num_cpus * 4), 1)  # Ensure at least 4 tasks per core
         batched_params = [
-            (omega_d_amp_params[i : i + batch_size], indices[i : i + batch_size])
+            (omega_d_amp_params[i:i + batch_size], indices[i:i + batch_size])
             for i in range(0, len(omega_d_amp_params), batch_size)
         ]
-
+        
         def _run_overlap_displaced_batch(batch: tuple) -> list:
             params_batch, indices_batch = batch
             results = []
-
-            for (omega_d, amp), (omega_d_idx, amp_idx) in zip(
-                params_batch, indices_batch, strict=True
-            ):
+            
+            for (omega_d, amp), (omega_d_idx, amp_idx) in zip(params_batch, indices_batch):
                 # Get floquet modes for this point
-                floquet_modes_at_point = floquet_modes[
-                    omega_d_idx, amp_idx
-                ]  # Shape: (s, h)
-
+                floquet_modes_at_point = floquet_modes[omega_d_idx, amp_idx]  # Shape: (s, h)
+                
                 # Compute coefficients for all components at once using numpy operations
                 xy_data = np.array([omega_d, amp])
-                coeffs = np.array(
+                coeffs = np.array([
                     [
-                        [
-                            self._coefficient_for_state(
-                                xy_data,
-                                *coefficients[array_idx, state_idx_component, :],
-                                bare_same=(state_idx == state_idx_component),
-                            )
-                            for state_idx_component in range(self.hilbert_dim)
-                        ]
-                        for array_idx, state_idx in enumerate(self.state_indices)
+                        self._coefficient_for_state(
+                            xy_data,
+                            *coefficients[array_idx, state_idx_component, :],
+                            bare_same=(state_idx == state_idx_component)
+                        )
+                        for state_idx_component in range(self.hilbert_dim)
                     ]
-                )  # Shape: (s, h)
-
+                    for array_idx, state_idx in enumerate(self.state_indices)
+                ])  # Shape: (s, h)
+                
                 # Compute all displaced states at once using matrix multiplication
                 disp_states = coeffs @ basis_states  # Shape: (s, h)
-
+                
                 # Normalize
-                norms = np.sqrt(np.sum(np.abs(disp_states) ** 2, axis=1))
+                norms = np.sqrt(np.sum(np.abs(disp_states)**2, axis=1))
                 disp_states = disp_states / norms[:, np.newaxis]
-
+                
                 # Compute all overlaps at once
-                overlaps = np.abs(
-                    np.sum(np.conj(disp_states) * floquet_modes_at_point, axis=1)
-                )
+                overlaps = np.abs(np.sum(np.conj(disp_states) * floquet_modes_at_point, axis=1))
                 results.append(overlaps)
-
+                
             return results
 
         # Process batches in parallel
         batch_results = parallel_map(
-            self.options.num_cpus, _run_overlap_displaced_batch, batched_params
+            self.options.num_cpus,
+            _run_overlap_displaced_batch,
+            batched_params
         )
-
+        
         # Flatten results
         results = []
         for batch in batch_results:
             results.extend(batch)
-
+        
         return np.array(results).reshape(
             (
                 len(self.model.omega_d_values),
@@ -360,6 +372,62 @@ class DisplacedStateFit(DisplacedState):
             )
         )
 
+    def displaced_states_fit_new(
+        self,
+        omega_d_amp_slice: list,
+        ovlp_with_bare_states: np.ndarray,
+        floquet_modes: np.ndarray,
+    ) -> np.ndarray:
+        
+        def _fit_for_state_idx(array_state_idx: tuple[int, int]) -> np.ndarray:
+            array_idx, state_idx = array_state_idx
+            floquet_mode_for_state = floquet_modes[:, :, array_idx, :]
+            mask = ovlp_with_bare_states[:, :, array_idx].ravel()
+            # only fit states that we think haven't run into
+            # a nonlinear transition (same for omega_d_amp_filtered above)
+            omega_d_amp_filtered = [
+                omega_d_amp_slice[i]
+                for i in range(len(mask))
+                if np.abs(mask[i]) > self.options.overlap_cutoff
+            ]
+            num_coeffs = len(self.exponent_pair_idx_map)
+            coefficient_matrix_for_amp_and_state = np.zeros(
+                (self.hilbert_dim, num_coeffs), dtype=complex
+            )
+            if len(omega_d_amp_filtered) < len(self.exponent_pair_idx_map):
+                warnings.warn(
+                    "Not enough data points to fit. Returning zeros for the fit",
+                    stacklevel=3,
+                )
+                return coefficient_matrix_for_amp_and_state
+            def _fit_for_dim(state_idx_component):
+                floquet_mode_bare_component = floquet_mode_for_state[
+                    :, :, state_idx_component
+                ].ravel()
+                floquet_component_filtered = floquet_mode_bare_component[
+                    np.abs(mask) > self.options.overlap_cutoff
+                ]
+                bare_same = state_idx_component == state_idx
+                bare_component_fit = self._fit_coefficients_for_component(
+                    omega_d_amp_filtered, floquet_component_filtered, bare_same
+                )
+                return bare_component_fit
+            fit_data = parallel_map(self.options.num_cpus, _fit_for_dim, range(self.hilbert_dim))   
+            for state_idx_component, data in enumerate(fit_data):
+                coefficient_matrix_for_amp_and_state[state_idx_component, :] = data
+            return coefficient_matrix_for_amp_and_state
+
+        array_idxs = np.arange(len(self.state_indices))
+        array_state_idxs = zip(array_idxs, self.state_indices, strict=False)
+        fit_data = [_fit_for_state_idx(array_state_idx) for array_state_idx in array_state_idxs]
+        return np.array(fit_data, dtype=complex).reshape(
+            (
+                len(self.state_indices),
+                self.hilbert_dim,
+                len(self._create_exponent_pair_idx_map()),
+            )
+        )
+    
     def _fit_coefficients_for_component(
         self,
         omega_d_amp_filtered: list,
